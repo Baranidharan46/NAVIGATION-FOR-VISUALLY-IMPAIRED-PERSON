@@ -1,13 +1,11 @@
+# Imports
 import cv2
 from ultralytics import YOLO
 import pyttsx3
 import time
 import threading
 
-# ─────────────────────────────────────────
-# TEXT-TO-SPEECH — runs in background thread
-# so it NEVER blocks the video frame
-# ─────────────────────────────────────────
+# Text-to-Speech (TTS)
 tts_lock = threading.Lock()
 
 def speak_thread(command):
@@ -27,13 +25,10 @@ def give_voice_command(command):
     t = threading.Thread(target=speak_thread, args=(command,), daemon=True)
     t.start()
 
-
-# ─────────────────────────────────────────
-# MODEL SETUP
-# yolov8m = best balance of speed + accuracy for real-time webcam
-# ─────────────────────────────────────────
+# Load YOLO Model
 model = YOLO('yolov8m.pt')
 
+# Detection Settings
 DETECT_CLASS_IDS = {0, 1, 2, 3, 5, 7, 9, 11}
 
 CLASS_SPEECH_NAMES = {
@@ -49,10 +44,7 @@ CLASS_SPEECH_NAMES = {
 
 CONFIDENCE_THRESHOLD = 0.50
 
-
-# ─────────────────────────────────────────
-# ZONE LOGIC
-# ─────────────────────────────────────────
+# Zone Calculation
 def get_zone(x_center, frame_width):
     left_boundary  = frame_width // 3
     right_boundary = 2 * (frame_width // 3)
@@ -63,6 +55,7 @@ def get_zone(x_center, frame_width):
     else:
         return 'center'
 
+# Direction Message Logic
 def get_direction_message(label, zone):
     if zone == 'left':
         return f"Caution! {label} detected on your left. Please move to the right."
@@ -71,10 +64,7 @@ def get_direction_message(label, zone):
     else:
         return f"Warning! {label} directly ahead. Please stop or slow down."
 
-
-# ─────────────────────────────────────────
-# COOLDOWN TRACKER
-# ─────────────────────────────────────────
+# Voice Cooldown Control
 COOLDOWN_SECONDS = 4
 last_spoken_time = {}
 
@@ -87,10 +77,7 @@ def can_speak(zone):
 def mark_spoken(zone):
     last_spoken_time[zone] = time.time()
 
-
-# ─────────────────────────────────────────
-# WEBCAM SETUP
-# ─────────────────────────────────────────
+# Webcam Initialization
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -101,13 +88,12 @@ if not cap.isOpened():
 
 print("Navigation system started. Press 'q' to quit.")
 
+# Frame Processing Setup
 frame_count    = 0
 SKIP_FRAMES    = 3
 detected_zones = {}
 
-# ─────────────────────────────────────────
-# MAIN LOOP
-# ─────────────────────────────────────────
+# Main Loop (Capture + Detection)
 while True:
     ret, frame = cap.read()
     if not ret:
@@ -151,7 +137,7 @@ while True:
                 give_voice_command(message)
                 mark_spoken(zone)
 
-    # Draw boxes on every frame (reuse last detections)
+    # Draw Bounding Boxes
     for zone, det in detected_zones.items():
         x1, y1, x2, y2 = det['box']
         label      = det['label']
@@ -165,7 +151,7 @@ while True:
             cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2
         )
 
-    # Zone dividers
+    # Display Zones
     cv2.line(frame, (frame_width // 3, 0), (frame_width // 3, frame_height), (255, 255, 0), 1)
     cv2.line(frame, (2 * frame_width // 3, 0), (2 * frame_width // 3, frame_height), (255, 255, 0), 1)
     cv2.putText(frame, 'LEFT',   (10, 30),                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
@@ -174,6 +160,7 @@ while True:
 
     cv2.imshow('YOLOv8 Navigation System', frame)
 
+    # Exit and Cleanup
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
