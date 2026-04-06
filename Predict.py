@@ -1,118 +1,182 @@
 import cv2
 from ultralytics import YOLO
 import pyttsx3
+import time
+import threading
 
-# Initialize text-to-speech engine
-engine = pyttsx3.init()
-engine.setProperty('rate', 150)  # Speed of speech
+# ─────────────────────────────────────────
+# TEXT-TO-SPEECH — runs in background thread
+# so it NEVER blocks the video frame
+# ─────────────────────────────────────────
+tts_lock = threading.Lock()
 
+def speak_thread(command):
+    with tts_lock:
+        try:
+            engine = pyttsx3.init()
+            engine.setProperty('rate', 145)
+            engine.setProperty('volume', 1.0)
+            engine.say(command)
+            engine.runAndWait()
+            engine.stop()
+        except Exception as e:
+            print(f"[TTS ERROR] {e}")
 
 def give_voice_command(command):
-    engine.say(command)
-    engine.runAndWait()
+    print(f"[AUDIO] {command}")
+    t = threading.Thread(target=speak_thread, args=(command,), daemon=True)
+    t.start()
 
 
-model = YOLO('yolov8m.pt')  # Use YOLOv8n for better performance on smaller devices
+# ─────────────────────────────────────────
+# MODEL SETUP
+# yolov8m = best balance of speed + accuracy for real-time webcam
+# ─────────────────────────────────────────
+model = YOLO('yolov8m.pt')
 
-# Define the class IDs for detection (Person, Bicycle, Car as examples)
-class_ids = [0,1, 2,3,5]  # Person, Bicycle, Car
+DETECT_CLASS_IDS = {0, 1, 2, 3, 5, 7, 9, 11}
 
-# Class names for COCO dataset
-class_names = ['person','Bicycle', 'Car','motorcycle', 'bus']
+CLASS_SPEECH_NAMES = {
+    0:  'person',
+    1:  'bicycle',
+    2:  'car',
+    3:  'motorcycle',
+    5:  'bus',
+    7:  'truck',
+    9:  'traffic light',
+    11: 'stop sign',
+}
 
-# Open webcam (change to video path if using a video file)
-cap = cv2.VideoCapture(0)  # Use 'video.mp4' or another file instead of 0 for videos
-dd0 = 0
-dd1 = 0
-dd2 = 0
+CONFIDENCE_THRESHOLD = 0.50
+
+
+# ─────────────────────────────────────────
+# ZONE LOGIC
+# ─────────────────────────────────────────
+def get_zone(x_center, frame_width):
+    left_boundary  = frame_width // 3
+    right_boundary = 2 * (frame_width // 3)
+    if x_center < left_boundary:
+        return 'left'
+    elif x_center > right_boundary:
+        return 'right'
+    else:
+        return 'center'
+
+def get_direction_message(label, zone):
+    if zone == 'left':
+        return f"Caution! {label} detected on your left. Please move to the right."
+    elif zone == 'right':
+        return f"Caution! {label} detected on your right. Please move to the left."
+    else:
+        return f"Warning! {label} directly ahead. Please stop or slow down."
+
+
+# ─────────────────────────────────────────
+# COOLDOWN TRACKER
+# ─────────────────────────────────────────
+COOLDOWN_SECONDS = 4
+last_spoken_time = {}
+
+def can_speak(zone):
+    now = time.time()
+    if zone not in last_spoken_time:
+        return True
+    return (now - last_spoken_time[zone]) >= COOLDOWN_SECONDS
+
+def mark_spoken(zone):
+    last_spoken_time[zone] = time.time()
+
+
+# ─────────────────────────────────────────
+# WEBCAM SETUP
+# ─────────────────────────────────────────
+cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
 if not cap.isOpened():
     print("Error: Could not open webcam.")
     exit()
 
+print("Navigation system started. Press 'q' to quit.")
+
+frame_count    = 0
+SKIP_FRAMES    = 3
+detected_zones = {}
+
+# ─────────────────────────────────────────
+# MAIN LOOP
+# ─────────────────────────────────────────
 while True:
     ret, frame = cap.read()
     if not ret:
         print("Error: Could not read frame.")
         break
 
-    # Perform detection
-    results = model(frame)
+    frame_height, frame_width = frame.shape[:2]
+    frame_count += 1
 
-    # Filter detections for the specified class IDs
-    for result in results:
-        for box in result.boxes:
-            if int(box.cls) in class_ids:  # Check if the detected class is in the list
-                class_id = int(box.cls)
-                label = class_names[class_ids.index(class_id)]  # Get class label
-                x1, y1, x2, y2 = map(int, box.xyxy[0])  # Bounding box coordinates
-                confidence = box.conf.item()  # Convert tensor to float
+    if frame_count % SKIP_FRAMES == 0:
+        detected_zones = {}
+        results = model(frame, verbose=False)
 
-                # Draw bounding box and label
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(frame, f'{label} {confidence:.2f}', (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        for result in results:
+            for box in result.boxes:
+                class_id   = int(box.cls)
+                confidence = float(box.conf)
 
-                # Get frame dimensions
-                #frame_width = frame.shape[1]
+                if class_id not in DETECT_CLASS_IDS:
+                    continue
+                if confidence < CONFIDENCE_THRESHOLD:
+                    continue
 
-                frame_height, frame_width = frame.shape[:2]  # Ensure this gives correct dimensions
-                frame_center_x = frame_width // 2
+                label = CLASS_SPEECH_NAMES[class_id]
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                x_center = (x1 + x2) // 2
+                zone = get_zone(x_center, frame_width)
 
-                bounding_box_center_x = (x1 + x2) // 2  # Center x-coordinate of the bounding box
+                if zone not in detected_zones or confidence > detected_zones[zone]['conf']:
+                    detected_zones[zone] = {
+                        'label': label,
+                        'conf':  confidence,
+                        'box':   (x1, y1, x2, y2),
+                        'zone':  zone,
+                    }
 
-                if 0 <= x1 <= 200:
-                    dd0 += 1
-                    if dd0 == 20:
-                        dd0 = 0
-                        give_voice_command("detected Object Name '" + label + "' on the Right side. Turn Left.")
-                        print("Person is on the Right side of the frame.")
+        for zone in ['center', 'left', 'right']:
+            if zone in detected_zones and can_speak(zone):
+                det = detected_zones[zone]
+                message = get_direction_message(det['label'], det['zone'])
+                give_voice_command(message)
+                mark_spoken(zone)
 
-                if  300 <= x1 <= 500:
-                    dd0 += 1
-                    if dd0 == 20:
-                        dd0 = 0
-                        give_voice_command("detected Object Name '" + label + "'on the Left right. Turn Right.")
-                        print("Person is on the Left side of the frame.")
-                if 201 <= x1 <= 299:
-                    dd2 += 1
+    # Draw boxes on every frame (reuse last detections)
+    for zone, det in detected_zones.items():
+        x1, y1, x2, y2 = det['box']
+        label      = det['label']
+        confidence = det['conf']
+        color = (0, 0, 255) if zone == 'center' else (0, 255, 0)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(
+            frame,
+            f"{label} {confidence:.0%} [{zone}]",
+            (x1, y1 - 10),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2
+        )
 
-                    if dd2 == 20:
-                        dd2 = 0
-                        give_voice_command("Obstacle ahead. Please be careful")
-                        break
+    # Zone dividers
+    cv2.line(frame, (frame_width // 3, 0), (frame_width // 3, frame_height), (255, 255, 0), 1)
+    cv2.line(frame, (2 * frame_width // 3, 0), (2 * frame_width // 3, frame_height), (255, 255, 0), 1)
+    cv2.putText(frame, 'LEFT',   (10, 30),                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+    cv2.putText(frame, 'CENTER', (frame_width//2 - 40, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+    cv2.putText(frame, 'RIGHT',  (frame_width - 80, 30),    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
+    cv2.imshow('YOLOv8 Navigation System', frame)
 
-                #print(f"Frame Width: {frame_width}")
-                #print(f"x1: {x1}, Frame Center X: {frame_center_x}, Bounding Box Center X: {bounding_box_center_x}")
-
-
-
-
-
-
-
-    # Show the frame
-    cv2.imshow('YOLOv8 Detection', frame)
-
-    # Exit on pressing 'q'
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-# Release the webcam and close windows
 cap.release()
 cv2.destroyAllWindows()
-
-'''coco_class_names = [
-    'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 
-    'boat', 'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 
-    'bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 
-    'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee', 
-    'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 
-    'skateboard', 'surfboard', 'tennis racket', 'bottle', 'wine glass', 'cup', 
-    'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple', 'sandwich', 'orange', 
-    'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair', 'couch', 
-    'potted plant', 'bed', 'dining table', 'toilet', 'TV', 'laptop', 'mouse', 
-    'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink', 
-    'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier', 
-    'toothbrush'
-]'''
+print("Navigation system stopped.")
